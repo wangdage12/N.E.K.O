@@ -1203,7 +1203,7 @@ def step_realtime_tts_worker(request_queue, response_queue, audio_api_key, voice
                         receive_task.cancel()
         
         except Exception as e:
-            logger.error(f"StepFun实时TTS Worker错误: {e}")
+            logger.error(f"StepFun实时TTS Worker错误: {type(e).__name__}: {e!r}", exc_info=True)
             if 'HTTP 503' in str(e):
                 _enqueue_error(response_queue, json.dumps({"code": "UPSTREAM_SERVER_BUSY"}))
             response_queue.put(("__ready__", False))
@@ -1226,7 +1226,7 @@ def step_realtime_tts_worker(request_queue, response_queue, audio_api_key, voice
     try:
         asyncio.run(async_worker())
     except Exception as e:
-        logger.error(f"StepFun实时TTS Worker启动失败: {e}")
+        logger.error(f"StepFun实时TTS Worker启动失败: {type(e).__name__}: {e!r}", exc_info=True)
         response_queue.put(("__ready__", False))
 
 
@@ -1594,7 +1594,7 @@ def qwen_realtime_tts_worker(request_queue, response_queue, audio_api_key, voice
                         receive_task.cancel()
         
         except Exception as e:
-            logger.error(f"Qwen实时TTS Worker错误: {e}")
+            logger.error(f"Qwen实时TTS Worker错误: {type(e).__name__}: {e!r}", exc_info=True)
             if 'HTTP 503' in str(e):
                 _enqueue_error(response_queue, json.dumps({"code": "UPSTREAM_SERVER_BUSY"}))
             response_queue.put(("__ready__", False))
@@ -1617,7 +1617,7 @@ def qwen_realtime_tts_worker(request_queue, response_queue, audio_api_key, voice
     try:
         asyncio.run(async_worker())
     except Exception as e:
-        logger.error(f"Qwen实时TTS Worker启动失败: {e}")
+        logger.error(f"Qwen实时TTS Worker启动失败: {type(e).__name__}: {e!r}", exc_info=True)
         response_queue.put(("__ready__", False))
 
 
