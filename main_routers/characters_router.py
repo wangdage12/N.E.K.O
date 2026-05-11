@@ -2965,12 +2965,34 @@ async def list_custom_tts_voices_for_characters():
     """获取自定义 TTS 可用声音列表（用于角色管理页面的音色选择）。
 
     当前由适配层处理 GPT-SoVITS provider 的路径映射与 voice_id 前缀规则。
+
+    与 ``check_custom_tts_voice_allowed`` 判定对称：要求 GPTSOVITS 开关开启 +
+    ENABLE_CUSTOM_API 启用 + http(s) 协议。否则即便能 fetch 到 GSV /api/v3/voices
+    并填入下拉，``validate_voice_id`` 也会在保存阶段拒绝 ``gsv:`` 前缀，导致
+    "列表能选但保存失败" 的不对称体验。
     """
     try:
         _config_manager = get_config_manager()
-        
+
+        core_config = await _config_manager.aget_core_config()
+        if not core_config.get('GPTSOVITS_ENABLED', False):
+            return JSONResponse({
+                'success': False,
+                'error': 'GPTSOVITS_NOT_ENABLED',
+                'code': 'GPTSOVITS_NOT_ENABLED',
+                'voices': []
+            }, status_code=400)
+
         # 使用与 gptsovits_tts_worker 相同的配置解析路径，确保 URL 一致
         tts_config = _config_manager.get_model_api_config('tts_custom')
+        if not tts_config.get('is_custom'):
+            return JSONResponse({
+                'success': False,
+                'error': 'CUSTOM_API_NOT_ENABLED',
+                'code': 'CUSTOM_API_NOT_ENABLED',
+                'voices': []
+            }, status_code=400)
+
         base_url = (tts_config.get('base_url') or '').rstrip('/')
         if not base_url or not (base_url.startswith('http://') or base_url.startswith('https://')):
             return JSONResponse({
@@ -3059,7 +3081,7 @@ async def get_microphone():
 async def get_voices():
     """获取当前API key对应的所有已注册音色"""
     _config_manager = get_config_manager()
-    result = {"voices": _config_manager.get_voices_for_current_api()}
+    result = {"voices": _config_manager.get_voices_for_current_api(for_listing=True)}
     
     core_config = await _config_manager.aget_core_config()
     active_native_provider = get_active_realtime_native_provider(_config_manager)

@@ -5883,30 +5883,34 @@ async function _loadPanelVoices(selectEl, currentVoiceId) {
                     });
                     selectEl.appendChild(nativeGroup);
                 }
-
-                // 保底：currentVoiceId 是 Gemini 别名（"中文男"、"male" 等）或本轮 catalog 没暴露
-                // 该 ID 时，下拉里没有匹配项 select 会回到首项；下次保存表单会被误判为
-                // "已清空"走 unregister_voice 分支，把用户保存的音色丢掉。这里仿 GSV 兜底，
-                // 给未知值补一条 "(?)" 占位条，保留原值供后端 normalize。
-                if (currentVoiceId
-                    && !selectEl.querySelector('option[value="' + CSS.escape(currentVoiceId) + '"]')) {
-                    const fallbackGroup = document.createElement('optgroup');
-                    const fallbackLabel = window.t ? window.t('character.savedVoiceFallback') : '当前已保存音色';
-                    fallbackGroup.label = '── ' + fallbackLabel + ' ──';
-                    fallbackGroup.dataset.geminiFallbackGroup = 'true';
-                    const fallbackOption = document.createElement('option');
-                    fallbackOption.value = currentVoiceId;
-                    fallbackOption.textContent = currentVoiceId + ' (?)';
-                    fallbackOption.title = currentVoiceId;
-                    fallbackOption.selected = true;
-                    fallbackGroup.appendChild(fallbackOption);
-                    selectEl.appendChild(fallbackGroup);
-                }
             }
         }
 
         // 加载 GPT-SoVITS 声音列表
         await _loadPanelGsvVoices(selectEl, currentVoiceId);
+
+        // 保底：currentVoiceId 在任何分支都没渲染时（Gemini 别名、免费版被过滤掉的
+        // CosyVoice 云端 voice_id、catalog 没暴露的 ID 等），下拉里没匹配项 select
+        // 会回到首项；下次保存表单会被误判为"已清空"走 unregister_voice 分支，把
+        // 用户保存的音色丢掉。给未知值补一条 "(?)" 占位条，保留原值供后端 normalize。
+        // 必须放在所有 loader（含 _loadPanelGsvVoices）之后才能正确判断是否已渲染；
+        // gsv: 前缀 ID 由 _loadPanelGsvVoices.ensureGsvFallback 自行兜底，跳过避免双插。
+        if (currentVoiceId
+            && !currentVoiceId.startsWith(GSV_PREFIX)
+            && !selectEl.querySelector('option[value="' + CSS.escape(currentVoiceId) + '"]')) {
+            const fallbackGroup = document.createElement('optgroup');
+            const fallbackLabel = window.t ? window.t('character.savedVoiceFallback') : '当前已保存音色';
+            fallbackGroup.label = '── ' + fallbackLabel + ' ──';
+            fallbackGroup.dataset.savedVoiceFallbackGroup = 'true';
+            const fallbackOption = document.createElement('option');
+            fallbackOption.value = currentVoiceId;
+            fallbackOption.textContent = currentVoiceId + ' (?)';
+            fallbackOption.title = currentVoiceId;
+            fallbackOption.selected = true;
+            fallbackGroup.appendChild(fallbackOption);
+            selectEl.appendChild(fallbackGroup);
+            selectEl.value = currentVoiceId;
+        }
     } catch (e) {
         console.warn('加载音色列表失败:', e);
     }
@@ -5937,13 +5941,52 @@ async function _loadPanelGsvVoices(selectEl, currentVoiceId) {
         selectEl.value = currentVoiceId;
     }
 
+    // GSV 不可用时把后端给的 code 翻成一行人话塞到下拉里——以前是静默丢，
+    // 用户连"为啥没出现"都看不到，只能猜是 server 没起还是开关没勾。
+    const _gsvT = (key, fallback) => (window.t && typeof window.t === 'function' && window.t(key)) || fallback;
+
+    function _appendGsvDiagnosticOption(message) {
+        const diagGroup = document.createElement('optgroup');
+        diagGroup.label = '── GPT-SoVITS ──';
+        diagGroup.dataset.gsvDiagGroup = 'true';
+        const diagOpt = document.createElement('option');
+        diagOpt.value = '';
+        diagOpt.disabled = true;
+        diagOpt.textContent = message;
+        diagGroup.appendChild(diagOpt);
+        selectEl.appendChild(diagGroup);
+    }
+
+    function _diagnoseFailure(result, status) {
+        const code = result && result.code;
+        if (code === 'GPTSOVITS_NOT_ENABLED') {
+            return _gsvT('character.gsvDiagNotEnabled', 'GPT-SoVITS 未启用 (请在 API 设置勾选)');
+        }
+        if (code === 'CUSTOM_API_NOT_ENABLED') {
+            return _gsvT('character.gsvDiagUrlMissing', 'GPT-SoVITS URL 未配置 (请在 API 设置填写)');
+        }
+        if (code === 'TTS_CUSTOM_URL_NOT_CONFIGURED') {
+            return _gsvT('character.gsvDiagUrlInvalid', 'GPT-SoVITS URL 未配置或不是 http(s)');
+        }
+        if (code === 'TTS_CUSTOM_URL_LOCALHOST_ONLY') {
+            return _gsvT('character.gsvDiagUrlLocalhostOnly', 'GPT-SoVITS URL 必须是 localhost');
+        }
+        if (status === 502 || (result && /连接 GPT-SoVITS API 失败/.test(result.error || ''))) {
+            return _gsvT('character.gsvDiagUnreachable', 'GPT-SoVITS server 未运行或不可达');
+        }
+        const base = _gsvT('character.gsvDiagLoadFailed', 'GPT-SoVITS 加载失败');
+        return base + (result && result.error ? ': ' + result.error : '');
+    }
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 3000);
 
     try {
         const resp = await fetch('/api/characters/custom_tts_voices', { signal: controller.signal });
         clearTimeout(timeoutId);
-        const result = await resp.json();
+        // 网关/反代可能返回 HTML 或空体，resp.json() 抛错会把 "Unexpected token <"
+        // 这种技术细节经 catch 暴露给用户，这里兜底成空对象走正常诊断分支。
+        const result = await resp.json().catch(() => ({}));
         if (result.success && Array.isArray(result.voices) && result.voices.length > 0) {
             const gsvGroup = document.createElement('optgroup');
             const gsvLabel = window.t ? window.t('character.gptsovitsVoices') : 'GPT-SoVITS 声音';
@@ -5967,11 +6010,21 @@ async function _loadPanelGsvVoices(selectEl, currentVoiceId) {
             if (currentVoiceId && currentVoiceId.startsWith(GSV_PREFIX)) {
                 selectEl.value = currentVoiceId;
             }
+        } else if (result && result.success && Array.isArray(result.voices) && result.voices.length === 0) {
+            _appendGsvDiagnosticOption(_gsvT('character.gsvDiagEmpty', 'GPT-SoVITS server 没有任何声音 (空列表)'));
+        } else {
+            _appendGsvDiagnosticOption(_diagnoseFailure(result, resp.status));
         }
         ensureGsvFallback();
     } catch (e) {
         clearTimeout(timeoutId);
         console.debug('GPT-SoVITS voices not available:', e.message);
+        if (e.name === 'AbortError') {
+            _appendGsvDiagnosticOption(_gsvT('character.gsvDiagTimeout', 'GPT-SoVITS server 响应超时 (>3s)'));
+        } else {
+            const base = _gsvT('character.gsvDiagLoadFailed', 'GPT-SoVITS 加载失败');
+            _appendGsvDiagnosticOption(base + (e && e.message ? ': ' + e.message : ''));
+        }
         ensureGsvFallback();
     }
 }
@@ -6090,8 +6143,22 @@ async function saveCatgirlFromPanel(form, originalName, isNew) {
                         body: JSON.stringify({ voice_id: selectedVoiceId })
                     });
                     const voiceResult = await voiceResp.json().catch(() => ({}));
+                    // 留 console 痕迹：toast 一闪而过看不清，这里把 PUT 的完整 status/payload
+                    // 持久打到 console，遇到 "保存后再打开 voice 又没了" 这类问题能直接定位
+                    // 是 PUT 被拒、还是后续 cleanup_invalid_voice_ids 把它清掉了。
+                    console.log(
+                        '[character voice PUT]',
+                        'name=', data['档案名'],
+                        'voice_id=', selectedVoiceId,
+                        'status=', voiceResp.status,
+                        'response=', voiceResult,
+                    );
                     if (!voiceResp.ok || voiceResult.success === false) {
                         const detail = (voiceResult && voiceResult.error) || (voiceResp.status + ' ' + voiceResp.statusText);
+                        // available_voices 直接打出来，方便看到 backend 当前认到的合法音色
+                        if (voiceResult && Array.isArray(voiceResult.available_voices)) {
+                            console.warn('[character voice PUT] backend 当前合法音色:', voiceResult.available_voices);
+                        }
                         showMessage(
                             window.t ? window.t('character.partialSaveVoiceFailed', { error: detail }) : '角色已保存，但音色更新失败: ' + detail,
                             'error'
