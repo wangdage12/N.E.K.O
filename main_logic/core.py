@@ -529,6 +529,12 @@ logger = get_module_logger(__name__, "Main")
 IDLE_SESSION_RESET_THRESHOLD_SECONDS = 1800
 IDLE_SESSION_RESET_CHECK_INTERVAL_SECONDS = 60
 
+# 前端文本会话 start_session 等 session_started 的硬超时（static/app-buttons.js
+# 的 setTimeout(..., 15000)）。start_session 去重路径等 in-flight 启动落定后给
+# 本请求补发 ack 时，等待上限绑到这个值：超过前端这个超时再补发 session_started
+# 已无意义（前端早已 reject 并发 end_session），故以它为有意义窗口的天然上界。
+FRONTEND_START_SESSION_TIMEOUT_SECONDS = 15.0
+
 # 主动搭话（proactive）调用 prompt_ephemeral 时设置的 sid 期望值。
 # 目的：prompt_ephemeral 内部通过 on_text_delta=handle_text_data 回调 enqueue TTS，
 # 中间可能被用户输入抢占（user stream_text 清 queue + 换 current_speech_id）。
@@ -3968,7 +3974,40 @@ class LLMSessionManager:
             return
         # 检查是否正在启动中
         if self._starting_session_count > 0:
-            logger.warning("⚠️ Session正在启动中，忽略重复请求")
+            # 另一路 start_session（典型是 greeting 的 auto-start）已在飞。早期实现
+            # 直接静默 return，但前端的 start_session 在 await 一个 session_started
+            # ack——若它撞在这里被去重，ack 永远不来，前端 15s 后超时并卡死（用户
+            # 在 greeting 出现前抢发消息触发的竞态：greeting 先把 in-flight 占住，
+            # 而它完成时发的 ack 又早于前端开始 await，前端两头落空）。
+            #
+            # 仅对**同模式**的去重请求补发 ack：in-flight 启的是它自己的模式，
+            # 跨模式（如 greeting 拉 text、另一路同刻请求 audio）若复用 in-flight 的
+            # session_started(text)，前端会按 text 切 UI、收口 promise，而用户要的
+            # audio 会话根本没起（CodeRabbit）。跨模式时维持原静默 return（与改动前
+            # 完全一致，不更差）。
+            if (self._starting_input_mode or input_mode) == input_mode:
+                logger.warning("⚠️ Session正在启动中，等 in-flight 启动落定后给本请求补发 session_started")
+                # 等 in-flight 那次启动**自己落定**（_starting_session_count 归 0）。
+                # 不拿 session_ready 当谓词：它可能还残留上一个 session 的 True
+                # （in-flight start 要过几个 await 才把它重置），那样循环会被直接
+                # 跳过、在 in-flight 还没真正起好时就误发 started 假阳性（Codex P1）。
+                # 等待上限绑前端的 start_session 超时：超过它再补发 ack 已无意义
+                # （前端早已 reject + end_session），故以它为窗口上界兼防挂安全阀。
+                _waited = 0.0
+                while self._starting_session_count > 0 and _waited < FRONTEND_START_SESSION_TIMEOUT_SECONDS:
+                    await asyncio.sleep(0.05)
+                    _waited += 0.05
+                # 仅当 in-flight 真正落定（count 归 0、即循环是「落定退出」而非
+                # 「超时退出」）且会话确实活跃时才补发 session_started（与
+                # in-flight 自身发的那条幂等，前端 resolver 一次性）。若是超时退出
+                # （count 仍 >0、in-flight 没结束），self.session/is_active 在 restart
+                # 流程里可能是上一个 session 残留的 True，补发会是假阳性（Codex P1），
+                # 故一律不发。也**不**发 session_failed——in-flight 可能仍在跑/或其
+                # 失败路径已通知前端，过早发 failed 会被前端当终态打断本会成功的启动。
+                if self._starting_session_count == 0 and self.session and self.is_active:
+                    await self.send_session_started(input_mode)
+            else:
+                logger.warning("⚠️ Session正在启动中（跨模式重复请求），忽略")
             return
 
         # 标记正在启动（使用计数器，避免并发 start_session 的 finally 互相覆盖）
