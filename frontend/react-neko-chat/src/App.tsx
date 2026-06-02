@@ -2550,11 +2550,13 @@ export default function App({
     });
     return () => window.cancelAnimationFrame(frameId);
   }, [
+    activeCursorToolId,
     compactInputToolFanInteractive,
     compactInputToolFanOpen,
     compactInputToolWheelIndex,
     effectiveCompactChatState,
     isCompactSurface,
+    toolMenuOpen,
   ]);
 
   const openCompactInputToolFan = useCallback((intent: 'click' | 'hover') => {
@@ -4554,7 +4556,7 @@ export default function App({
               setToolMenuOpen(false);
             }}
           >
-            <span aria-hidden="true">脳</span>
+            <span className="composer-tool-clear-icon" aria-hidden="true" />
           </button>
         ) : null}
       </div>
